@@ -17,30 +17,16 @@ Usage: ./gradlew run --args="$SAVE_CMD <path>"
 """.trimIndent()
 const val DEFAULT_BUCKET = "DEFAULT-BUCKET"
 
-fun validateArgs(args: Array<String>): Boolean {
-    if (args.size < 2) {
-        return false
-    }
-    return when (args[0]) {
-        SAVE_CMD -> {
-            args.size == 2
-        }
-        RESTORE_CMD -> {
-            args.size == 3 || args.size == 4
-        }
-        else -> false
-    }
-}
+fun objectKey(path: String) = Path(path).toAbsolutePath().pathString.replace("/", "%")
 
 fun saveMain(path: String) {
     val bodyBytes = FileSerializer.serialize(path)
-    val objectKey = Path(path).toAbsolutePath().pathString.hashCode().toString()
     FakeS3Client().use { s3 ->
         runBlocking {
             s3.createBucket(CreateBucketRequest { bucket = DEFAULT_BUCKET })
             s3.putObject(PutObjectRequest {
                 bucket = DEFAULT_BUCKET
-                key = objectKey
+                key = objectKey(path)
                 body = bodyBytes
             })
         }
@@ -48,13 +34,11 @@ fun saveMain(path: String) {
 }
 
 fun restoreMain(path: String, destination: String, filepath: String?) {
-    val objectKey = Path(path).toAbsolutePath().pathString.hashCode().toString()
     runBlocking {
-        val client = FakeS3Client()
-        client.use { s3 ->
+        FakeS3Client().use { s3 ->
             val obj = s3.getObject(GetObjectRequest {
                 bucket = DEFAULT_BUCKET
-                key = objectKey
+                key = objectKey(path)
             }) { response ->
                 response.body!!
             }
@@ -64,15 +48,14 @@ fun restoreMain(path: String, destination: String, filepath: String?) {
 }
 
 fun main(args: Array<String>) {
-    if (!validateArgs(args)) {
-        println(HELP)
-        println("Received arguments: ${args.joinToString()}")
-        return
-    }
-    when (args[0]) {
-        SAVE_CMD -> return saveMain(args[1])
-        RESTORE_CMD -> return restoreMain(args[1], args[2], if (args.size == 4) args[3] else null)
+    when {
+        args.size == 2 && args[0] == SAVE_CMD -> return saveMain(args[1])
+        args.size == 3 && args[0] == RESTORE_CMD -> return restoreMain(args[1], args[2], null)
+        args.size == 4 && args[0] == RESTORE_CMD -> return restoreMain(args[1], args[2], args[3])
         // unreachable
-        else -> assert(false)
+        else -> {
+            println(HELP)
+            println("Received arguments: ${args.joinToString()}")
+        }
     }
 }

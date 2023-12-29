@@ -6,25 +6,75 @@ import aws.sdk.kotlin.services.s3.model.*
 import aws.smithy.kotlin.runtime.content.ByteStream
 import aws.smithy.kotlin.runtime.content.asByteStream
 import aws.smithy.kotlin.runtime.content.toByteArray
+import aws.smithy.kotlin.runtime.content.toInputStream
 import java.nio.file.Paths
 import kotlin.io.path.*
 
-const val STORAGE_DIR = "storage_dir"
-
-data class S3Object(val bytes: ByteArray) {
-    override fun equals(other: Any?): Boolean {
-        if (this === other) return true
-        if (javaClass != other?.javaClass) return false
-        other as S3Object
-        return bytes.contentEquals(other.bytes)
-    }
-
-    override fun hashCode() = bytes.hashCode()
-}
-typealias Bucket = MutableMap<String, S3Object>
+val STORAGE_DIR: String = System.getProperty("storageDir", "storage_dir")
 
 class FakeS3Client : S3Client {
-    private val buckets: MutableMap<String, Bucket> = mutableMapOf()
+    init {
+        val storageDir = Path(STORAGE_DIR)
+        if (!storageDir.exists()) {
+            storageDir.createDirectory()
+        }
+    }
+
+    override fun close() {
+
+    }
+
+    override suspend fun createBucket(input: CreateBucketRequest): CreateBucketResponse {
+        val storageDir = Paths.get(STORAGE_DIR)
+        val bucketDir = Paths.get(storageDir.pathString, input.bucket!!)
+        if (!bucketDir.exists()) {
+            bucketDir.createDirectory()
+        }
+        return CreateBucketResponse {
+            location = input.bucket?.let { "/$it" }
+        }
+    }
+
+    override suspend fun <T> getObject(
+        input: GetObjectRequest,
+        block: suspend (GetObjectResponse) -> T
+    ): T {
+        val bucket = input.bucket!!
+        val key = input.key!!
+        return block(GetObjectResponse {
+            body = getObjectByteStream(bucket, key)
+        })
+    }
+
+    private fun getObjectByteStream(bucket: String, key: String): ByteStream {
+        val path = Paths.get(STORAGE_DIR, bucket, key)
+        if (!path.exists()) {
+            throw Exception("No object $key in bucket $bucket")
+        }
+        return path.toFile().asByteStream()
+    }
+
+    override suspend fun putObject(input: PutObjectRequest): PutObjectResponse {
+        val bucket = input.bucket!!
+        val key = input.key!!
+        val bucketPath = Paths.get(STORAGE_DIR, bucket)
+        if (!bucketPath.exists()) {
+            throw AwsServiceException("Bucket $bucket doesn't exist")
+        }
+        val objectPath = Paths.get(bucketPath.pathString, key)
+        val objectOutputStream = objectPath.toFile().outputStream()
+        objectOutputStream.use { outputStream ->
+            val objectInputStream = input.body!!.toInputStream()
+            objectInputStream.use { inputStream ->
+                inputStream.copyTo(outputStream)
+            }
+        }
+        return PutObjectResponse {}
+    }
+
+// =====================================================================
+// ========================== NOT IMPLEMENTED ==========================
+// =====================================================================
 
     override val config: S3Client.Config
         get() = TODO("Not yet implemented")
@@ -33,36 +83,12 @@ class FakeS3Client : S3Client {
         TODO("Not yet implemented")
     }
 
-    override fun close() {
-        val storageDir = Paths.get(STORAGE_DIR)
-        if (!storageDir.exists()) {
-            storageDir.createDirectory()
-        }
-        for ((bucketKey, objects) in buckets) {
-            val bucketDir = Paths.get(storageDir.pathString, bucketKey)
-            if (!bucketDir.exists()) {
-                bucketDir.createDirectory()
-            }
-            for ((objectKey, obj) in objects) {
-                val objectDir = Paths.get(bucketDir.pathString, objectKey)
-                objectDir.toFile().writeBytes(obj.bytes)
-            }
-        }
-    }
-
     override suspend fun completeMultipartUpload(input: CompleteMultipartUploadRequest): CompleteMultipartUploadResponse {
         TODO("Not yet implemented")
     }
 
     override suspend fun copyObject(input: CopyObjectRequest): CopyObjectResponse {
         TODO("Not yet implemented")
-    }
-
-    override suspend fun createBucket(input: CreateBucketRequest): CreateBucketResponse {
-        input.bucket?.let { buckets.putIfAbsent(it, mutableMapOf()) }
-        return CreateBucketResponse {
-            location = input.bucket?.let { "/$it" }
-        }
     }
 
     override suspend fun createMultipartUpload(input: CreateMultipartUploadRequest): CreateMultipartUploadResponse {
@@ -215,33 +241,6 @@ class FakeS3Client : S3Client {
 
     override suspend fun getBucketWebsite(input: GetBucketWebsiteRequest): GetBucketWebsiteResponse {
         TODO("Not yet implemented")
-    }
-
-    override suspend fun <T> getObject(
-        input: GetObjectRequest,
-        block: suspend (GetObjectResponse) -> T
-    ): T {
-        val bucket = input.bucket!!
-        val key = input.key!!
-        // TODO handle the case when the object is not loaded
-        return block(GetObjectResponse {
-            body = getObjectBytes(bucket, key)
-        })
-    }
-
-    private fun getObjectBytes(bucket: String, key: String): ByteStream {
-        val bytes = buckets[bucket]?.let { it[key] }?.bytes
-        return bytes?.let { ByteStream.fromBytes(it) }
-               ?: loadObjectFromMemory(bucket, key)
-               ?: throw Exception("No object $key in bucket $bucket")
-    }
-
-    private fun loadObjectFromMemory(bucket: String, key: String): ByteStream? {
-        val path = Paths.get(STORAGE_DIR, bucket, key)
-        if (!path.exists()) {
-            return null
-        }
-        return path.toFile().asByteStream()
     }
 
     override suspend fun getObjectAcl(input: GetObjectAclRequest): GetObjectAclResponse {
@@ -397,18 +396,6 @@ class FakeS3Client : S3Client {
 
     override suspend fun putBucketWebsite(input: PutBucketWebsiteRequest): PutBucketWebsiteResponse {
         TODO("Not yet implemented")
-    }
-
-    override suspend fun putObject(input: PutObjectRequest): PutObjectResponse {
-        val bucket = input.bucket!!
-        val key = input.key!!
-        val body = input.body!!.toByteArray()
-        putObject(bucket, key, body)
-        return PutObjectResponse {}
-    }
-
-    private fun putObject(bucket: String, key: String, body: ByteArray) {
-        buckets[bucket]?.let { it[key] = S3Object(body) } ?: throw AwsServiceException()
     }
 
     override suspend fun putObjectAcl(input: PutObjectAclRequest): PutObjectAclResponse {
